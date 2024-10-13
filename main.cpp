@@ -23,15 +23,12 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, std::stri
 }
 
 std::string makeHttpRequest(const std::string &url) {
-    CURL *curl;
-    CURLcode res;
     std::string readBuffer;
-    curl = curl_easy_init();
-    if (curl) {
+    if (CURL *curl = curl_easy_init()) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        res = curl_easy_perform(curl);
+        CURLcode res = curl_easy_perform(curl);
         curl_easy_cleanup(curl);
         if (res != CURLE_OK) {
             std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
@@ -234,14 +231,13 @@ struct Player {
 std::vector<Player> players;
 
 int getCurrentYear() {
-    time_t now = time(0);
+    time_t now = time(nullptr);
     tm *ltm = localtime(&now);
     return 1900 + ltm->tm_year;
 }
 
 void storePlayersInMemory(SQLite::Database &db) {
     players.clear();
-    int current_year = getCurrentYear();
 
     // Query for rostered players
     std::string queryString =
@@ -251,7 +247,7 @@ void storePlayersInMemory(SQLite::Database &db) {
             "JOIN teams t ON r.team_id = t.id "
             "WHERE p.team IS NOT NULL "
             "AND p.position IN ('K', 'QB', 'RB', 'WR', 'TE')";
-    if (std::find(playerColumns.begin(), playerColumns.end(), "status") != playerColumns.end()) {
+    if (std::ranges::find(playerColumns, "status") != playerColumns.end()) {
         queryString += " AND p.status = 'Active'";
     }
 
@@ -275,7 +271,7 @@ void storePlayersInMemory(SQLite::Database &db) {
                                "WHERE id NOT IN (SELECT player_id FROM rosters) "
                                "AND team IS NOT NULL "
                                "AND position IN ('K', 'QB', 'RB', 'WR', 'TE')";
-    if (std::find(playerColumns.begin(), playerColumns.end(), "status") != playerColumns.end()) {
+    if (std::ranges::find(playerColumns, "status") != playerColumns.end()) {
         query2String += " AND status = 'Active'";
     }
 
@@ -297,14 +293,14 @@ void storePlayersInMemory(SQLite::Database &db) {
 std::string cleanName(const std::string &name) {
     std::string cleaned = name;
     // Remove non-breaking spaces (UTF-8 encoded)
-    cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '\xC2'), cleaned.end());
-    cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '\xA0'), cleaned.end());
+    std::erase(cleaned, '\xC2');
+    std::erase(cleaned, '\xA0');
     // Remove trailing spaces
     while (!cleaned.empty() && std::isspace(cleaned.back())) {
         cleaned.pop_back();
     }
     // Convert to lowercase for case-insensitive comparison
-    std::transform(cleaned.begin(), cleaned.end(), cleaned.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::ranges::transform(cleaned, cleaned.begin(), [](unsigned char c) { return std::tolower(c); });
     return cleaned;
 }
 
@@ -345,8 +341,8 @@ bool namesMatch(const std::string &name1, const std::string &name2) {
     if (parts1.size() != parts2.size()) {
         const auto &shorter = parts1.size() < parts2.size() ? parts1 : parts2;
         const auto &longer = parts1.size() < parts2.size() ? parts2 : parts1;
-        return std::all_of(shorter.begin(), shorter.end(), [&longer](const std::string &part) {
-            return std::find(longer.begin(), longer.end(), part) != longer.end();
+        return std::ranges::all_of(shorter, [&longer](const std::string &part) {
+            return std::ranges::find(longer, part) != longer.end();
         });
     }
 
@@ -359,15 +355,15 @@ void fetchDraftInformation(int year) {
 
 
     htmlDocPtr doc =
-            htmlReadMemory(html.c_str(), html.length(), url.c_str(), NULL, HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING);
-    if (doc == NULL) {
+            htmlReadMemory(html.c_str(), html.length(), url.c_str(), nullptr, HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING);
+    if (doc == nullptr) {
         std::cerr << "Failed to parse HTML for " << year << std::endl;
         return;
     }
 
 
     xmlXPathContextPtr context = xmlXPathNewContext(doc);
-    if (context == NULL) {
+    if (context == nullptr) {
         std::cerr << "Failed to create XPath context" << std::endl;
         xmlFreeDoc(doc);
         return;
@@ -378,7 +374,7 @@ void fetchDraftInformation(int year) {
             xmlXPathEvalExpression(BAD_CAST "//table[contains(@class, 'wikitable') and contains(@class, 'sortable') "
                                             "and contains(@class, 'plainrowheaders')]",
                                    context);
-    if (result == NULL) {
+    if (result == nullptr) {
         std::cerr << "XPath query failed" << std::endl;
         xmlXPathFreeContext(context);
         xmlFreeDoc(doc);
@@ -415,17 +411,15 @@ void fetchDraftInformation(int year) {
                 while (cell) {
                     if (cell->type == XML_ELEMENT_NODE && (xmlStrcmp(cell->name, (const xmlChar *) "td") == 0 ||
                                                            xmlStrcmp(cell->name, (const xmlChar *) "th") == 0)) {
-                        xmlChar *content = xmlNodeGetContent(cell);
-                        if (content) {
+                        if (xmlChar *content = xmlNodeGetContent(cell)) {
                             std::string cellContent = (char *) content;
-                            cellContent.erase(std::remove(cellContent.begin(), cellContent.end(), '\n'),
-                                              cellContent.end());
+                            std::erase(cellContent, '\n');
                             cellContent = std::regex_replace(cellContent, std::regex("\\s+"), " ");
                             cellContent = std::regex_replace(cellContent, std::regex("^ +| +$"), "");
                             rowData.push_back(cellContent);
                             xmlFree(content);
                         } else {
-                            rowData.push_back("");
+                            rowData.emplace_back("");
                         }
                     }
                     cell = cell->next;
@@ -552,7 +546,7 @@ void storeProcessedPlayers(SQLite::Database &db) {
     }
 }
 
-void displayProcessedPlayersFromDB(SQLite::Database &db) {
+void displayProcessedPlayersFromDB(const SQLite::Database &db) {
     std::cout << "\nProcessed Players from Database:\n";
     SQLite::Statement query(db, "SELECT * FROM processed_players");
     while (query.executeStep()) {
@@ -567,7 +561,7 @@ void displayProcessedPlayersFromDB(SQLite::Database &db) {
 
 // Add this function to your code:
 
-void displayRecentHighDraftUnrosteredPlayers(SQLite::Database &db) {
+void displayRecentHighDraftUnrosteredPlayers(const SQLite::Database &db) {
     int currentYear = getCurrentYear();
     int threeYearsAgo = currentYear - 2; // To get the last 3 years
 
@@ -631,7 +625,7 @@ int main() {
             std::cout << "Skipping player database update." << std::endl;
             SQLite::Statement query(db, "PRAGMA table_info(players)");
             while (query.executeStep()) {
-                playerColumns.push_back(query.getColumn(1).getText());
+                playerColumns.emplace_back(query.getColumn(1).getText());
             }
         }
 
@@ -655,15 +649,22 @@ int main() {
         // Store the processed players in the database
         storeProcessedPlayers(db);
 
-        // Display processed players from the database
-
-
         // Display recent high draft unrostered players
         displayRecentHighDraftUnrosteredPlayers(db);
 
         curl_global_cleanup();
+
+        // Add this section to keep the program open
+        std::cout << "\nPress Enter to exit...";
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        std::cin.get();
+
     } catch (std::exception &e) {
         std::cout << "Exception: " << e.what() << std::endl;
+        // Also add a prompt here to keep the console open in case of an exception
+        std::cout << "\nPress Enter to exit...";
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        std::cin.get();
         return 1;
     }
 
