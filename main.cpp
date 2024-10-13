@@ -3,11 +3,14 @@
 #include <vector>
 #include <set>
 #include <algorithm>
+#include <regex>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <SQLiteCpp/SQLiteCpp.h>
 #include <libxml/HTMLparser.h>
 #include <libxml/xpath.h>
+#include <iomanip>
+
 
 
 using json = nlohmann::json;
@@ -75,7 +78,7 @@ void createLeagueTables(SQLite::Database& db) {
 }
 
 void fetchAndStorePlayersFromSleeper(SQLite::Database& db) {
-    std::cout << "Fetching players from Sleeper API. This may take a moment..." << std::endl;
+
 
     std::string players_url = "https://api.sleeper.app/v1/players/nfl";
     std::string players_response = makeHttpRequest(players_url);
@@ -153,20 +156,20 @@ void fetchAndStorePlayersFromSleeper(SQLite::Database& db) {
 
             count++;
             if (count % 100 == 0) {
-                std::cout << "Processed " << count << " players..." << std::endl;
+
             }
         }
 
         transaction.commit();
-        std::cout << "Successfully updated database with " << count << " players." << std::endl;
+
     }
     catch (std::exception& e) {
-        std::cerr << "Error while updating database: " << e.what() << std::endl;
+
     }
 }
 
 void fetchAndStoreLeagueData(SQLite::Database& db, const std::string& league_id) {
-    std::cout << "Fetching league data..." << std::endl;
+
 
     std::string users_url = "https://api.sleeper.app/v1/league/" + league_id + "/users";
     std::string users_response = makeHttpRequest(users_url);
@@ -210,7 +213,7 @@ void fetchAndStoreLeagueData(SQLite::Database& db, const std::string& league_id)
         }
 
         transaction.commit();
-        std::cout << "Successfully updated league data." << std::endl;
+
     }
     catch (std::exception& e) {
         std::cerr << "Error while updating league data: " << e.what() << std::endl;
@@ -228,6 +231,7 @@ struct Player {
     int draft_round;
     int draft_pick;
     std::string draft_team;
+    bool is_drafted;  // New field to track if the player was drafted
 };
 
 std::vector<Player> players;
@@ -263,7 +267,7 @@ void storePlayersInMemory(SQLite::Database& db) {
         player.fantasy_team = query.getColumn(3).getText();
         player.nfl_team = query.getColumn(4).getText();
         player.years_exp = query.getColumn(5).getInt();
-        player.draft_year = current_year - player.years_exp;
+        player.is_drafted = false;  // Initialize as undrafted
         players.push_back(player);
     }
 
@@ -287,7 +291,7 @@ void storePlayersInMemory(SQLite::Database& db) {
         player.nfl_team = query2.getColumn(3).getText();
         player.fantasy_team = "Unrostered";
         player.years_exp = query2.getColumn(4).getInt();
-        player.draft_year = current_year - player.years_exp;
+        player.is_drafted = false;  // Initialize as undrafted
         players.push_back(player);
     }
 }
@@ -323,19 +327,45 @@ std::pair<int, int> getDraftYearRange(const std::vector<Player>& players) {
     return std::make_pair(oldestDraftYear, currentYear);
 }
 
+bool namesMatch(const std::string& name1, const std::string& name2) {
+    std::string clean1 = cleanName(name1);
+    std::string clean2 = cleanName(name2);
+
+    // Check for exact match after cleaning
+    if (clean1 == clean2) return true;
+
+    // Split names into parts
+    std::vector<std::string> parts1, parts2;
+    std::istringstream iss1(clean1), iss2(clean2);
+    std::string part;
+    while (iss1 >> part) parts1.push_back(part);
+    while (iss2 >> part) parts2.push_back(part);
+
+    // Check if all parts of the shorter name are in the longer name
+    if (parts1.size() != parts2.size()) {
+        const auto& shorter = parts1.size() < parts2.size() ? parts1 : parts2;
+        const auto& longer = parts1.size() < parts2.size() ? parts2 : parts1;
+        return std::all_of(shorter.begin(), shorter.end(),
+                           [&longer](const std::string& part) {
+                               return std::find(longer.begin(), longer.end(), part) != longer.end();
+                           });
+    }
+
+    return false;
+}
+
 void fetchDraftInformation(int year) {
     std::string url = "https://en.wikipedia.org/wiki/" + std::to_string(year) + "_NFL_draft";
     std::string html = makeHttpRequest(url);
 
-    std::cout << "Fetching draft information for " << year << std::endl;
-    std::cout << "Fetched HTML content. Length: " << html.length() << " characters." << std::endl;
+
 
     htmlDocPtr doc = htmlReadMemory(html.c_str(), html.length(), url.c_str(), NULL, HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING);
     if (doc == NULL) {
         std::cerr << "Failed to parse HTML for " << year << std::endl;
         return;
     }
-    std::cout << "HTML parsed successfully for " << year << std::endl;
+
 
     xmlXPathContextPtr context = xmlXPathNewContext(doc);
     if (context == NULL) {
@@ -343,9 +373,8 @@ void fetchDraftInformation(int year) {
         xmlFreeDoc(doc);
         return;
     }
-    std::cout << "XPath context created." << std::endl;
 
-    // Find the specific table with all three classes
+
     xmlXPathObjectPtr result = xmlXPathEvalExpression(BAD_CAST "//table[contains(@class, 'wikitable') and contains(@class, 'sortable') and contains(@class, 'plainrowheaders')]", context);
     if (result == NULL) {
         std::cerr << "XPath query failed" << std::endl;
@@ -355,27 +384,25 @@ void fetchDraftInformation(int year) {
     }
 
     xmlNodeSetPtr tables = result->nodesetval;
-    std::cout << "Found " << tables->nodeNr << " tables with the specific classes" << std::endl;
+
 
     if (tables->nodeNr == 0) {
-        std::cout << "Could not find the draft table in the HTML." << std::endl;
+
         xmlXPathFreeObject(result);
         xmlXPathFreeContext(context);
         xmlFreeDoc(doc);
         return;
     }
 
-    xmlNodePtr table = tables->nodeTab[0];  // We expect only one table with these specific classes
-    std::cout << "Processing the draft table..." << std::endl;
+    xmlNodePtr table = tables->nodeTab[0];
 
-    // Find the tbody element
+
     xmlNodePtr tbody = table->children;
     while (tbody && xmlStrcmp(tbody->name, (const xmlChar *)"tbody") != 0) {
         tbody = tbody->next;
     }
 
     if (tbody) {
-        // Process each row in the tbody
         xmlNodePtr row = tbody->children;
         int rowCount = 0;
         while (row) {
@@ -389,7 +416,11 @@ void fetchDraftInformation(int year) {
                         xmlStrcmp(cell->name, (const xmlChar *)"th") == 0)) {
                         xmlChar* content = xmlNodeGetContent(cell);
                         if (content) {
-                            rowData.push_back((char*)content);
+                            std::string cellContent = (char*)content;
+                            cellContent.erase(std::remove(cellContent.begin(), cellContent.end(), '\n'), cellContent.end());
+                            cellContent = std::regex_replace(cellContent, std::regex("\\s+"), " ");
+                            cellContent = std::regex_replace(cellContent, std::regex("^ +| +$"), "");
+                            rowData.push_back(cellContent);
                             xmlFree(content);
                         } else {
                             rowData.push_back("");
@@ -398,9 +429,9 @@ void fetchDraftInformation(int year) {
                     cell = cell->next;
                 }
 
-                std::cout << "Row " << rowCount << " data:" << std::endl;
+
                 for (size_t i = 0; i < rowData.size(); ++i) {
-                    std::cout << "  Column " << i << ": " << rowData[i] << std::endl;
+
                 }
 
                 if (rowData.size() >= 5) {
@@ -410,42 +441,47 @@ void fetchDraftInformation(int year) {
                         std::string team = rowData[3];
                         std::string player_name = cleanName(rowData[4]);
 
-                        std::cout << "Processed: Round " << round << ", Pick " << pick
-                                  << ", Team " << team << ", Player " << player_name << std::endl;
+                        player_name = std::regex_replace(player_name, std::regex("<[^>]*>"), "");
+                        player_name = std::regex_replace(player_name, std::regex("&nbsp;"), " ");
+                        player_name = std::regex_replace(player_name, std::regex("[†‡*]"), "");
+                        player_name = std::regex_replace(player_name, std::regex("^ +| +$"), "");
 
-                        // Update player information
+
+
                         bool playerFound = false;
                         for (auto& player : players) {
-                            if (cleanName(player.full_name) == player_name) {
+                            if (namesMatch(player.full_name, player_name)) {
                                 player.draft_round = round;
                                 player.draft_pick = pick;
                                 player.draft_team = team;
+                                player.draft_year = year;
+                                player.is_drafted = true;
                                 playerFound = true;
-                                std::cout << "Updated player information for " << player_name << std::endl;
+
                                 break;
                             }
                         }
                         if (!playerFound) {
-                            std::cout << "Player not found in database: " << player_name << std::endl;
+
                         }
                     } catch (const std::exception& e) {
-                        std::cerr << "Error processing row: " << e.what() << std::endl;
+
                     }
                 } else {
-                    std::cout << "Row " << rowCount << " does not have enough columns." << std::endl;
+
                 }
             }
             row = row->next;
         }
-        std::cout << "Processed " << rowCount << " rows from the draft table." << std::endl;
+
     } else {
-        std::cout << "Could not find tbody in the draft table." << std::endl;
+
     }
 
     xmlXPathFreeObject(result);
     xmlXPathFreeContext(context);
     xmlFreeDoc(doc);
-    std::cout << "Finished processing draft information." << std::endl;
+
 }
 
 
@@ -471,11 +507,119 @@ void displayPlayersWithDraftInfo() {
     }
 }
 
-/*
- * IT MESSES UP WITH THE YELLOW PLAYERS THAT HAVE THE CROSS (PRO BOWLERS) ALSO ANY COLORED ONE. ALSO ITS ONLY DOING PLAYERS ON ROSTERS RN Also does not do brian thomas bc name difference. marvin harris jr
-*<td bgcolor="#faecc8"><span data-sort-value="Kupp, Cooper"><span class="vcard"><span class="fn"><a href="/wiki/Cooper_Kupp" title="Cooper Kupp">Cooper Kupp</a></span></span></span>&nbsp;<sup>†</sup>
-</td>
-*/
+void createProcessedPlayersTable(SQLite::Database& db) {
+    db.exec("CREATE TABLE IF NOT EXISTS processed_players ("
+            "id TEXT PRIMARY KEY, "
+            "full_name TEXT, "
+            "position TEXT, "
+            "nfl_team TEXT, "
+            "fantasy_team TEXT, "
+            "years_exp INTEGER, "
+            "draft_year INTEGER, "
+            "draft_round INTEGER, "
+            "draft_pick INTEGER, "
+            "draft_team TEXT)");
+}
+
+void storeProcessedPlayers(SQLite::Database& db) {
+    SQLite::Transaction transaction(db);
+
+    try {
+        SQLite::Statement query(db, "INSERT OR REPLACE INTO processed_players "
+                                    "(id, full_name, position, nfl_team, fantasy_team, years_exp, "
+                                    "draft_year, draft_round, draft_pick, draft_team) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+
+        int stored_count = 0;
+        for (const auto& player : players) {
+            if (player.is_drafted) {
+                query.bind(1, player.id);
+                query.bind(2, player.full_name);
+                query.bind(3, player.position);
+                query.bind(4, player.nfl_team);
+                query.bind(5, player.fantasy_team);
+                query.bind(6, player.years_exp);
+                query.bind(7, player.draft_year);
+                query.bind(8, player.draft_round);
+                query.bind(9, player.draft_pick);
+                query.bind(10, player.draft_team);
+                query.exec();
+                query.reset();
+                stored_count++;
+            }
+        }
+
+        transaction.commit();
+        std::cout << "Successfully stored " << stored_count << " drafted players in the database." << std::endl;
+    }
+    catch (std::exception& e) {
+        std::cerr << "Error while storing processed players: " << e.what() << std::endl;
+    }
+}
+
+void displayProcessedPlayersFromDB(SQLite::Database& db) {
+    std::cout << "\nProcessed Players from Database:\n";
+    SQLite::Statement query(db, "SELECT * FROM processed_players");
+    while (query.executeStep()) {
+        std::cout << query.getColumn("full_name").getText() << " (" << query.getColumn("position").getText() << ") - "
+                  << "NFL Team: " << query.getColumn("nfl_team").getText() << ", "
+                  << "Fantasy Team: " << query.getColumn("fantasy_team").getText() << ", "
+                  << "Draft: Year " << query.getColumn("draft_year").getInt()
+                  << ", Round " << query.getColumn("draft_round").getInt()
+                  << ", Pick " << query.getColumn("draft_pick").getInt()
+                  << " by " << query.getColumn("draft_team").getText() << std::endl;
+    }
+}
+
+// Add this function to your code:
+
+void displayRecentHighDraftUnrosteredPlayers(SQLite::Database& db) {
+    int currentYear = getCurrentYear();
+    int threeYearsAgo = currentYear - 2; // To get the last 3 years
+
+    std::cout << "\n========== Unrostered High Draft Picks (Last 3 Drafts) ==========\n";
+
+    std::string query =
+        "SELECT * FROM processed_players "
+        "WHERE fantasy_team = 'Unrostered' "
+        "AND draft_round <= 3 "
+        "AND draft_year >= ? "
+        "ORDER BY draft_year DESC, draft_pick ASC";
+
+    try {
+        SQLite::Statement stmt(db, query);
+        stmt.bind(1, threeYearsAgo);
+
+        int prevYear = 0;
+        while (stmt.executeStep()) {
+            int year = stmt.getColumn("draft_year").getInt();
+            if (year != prevYear) {
+                if (prevYear != 0) std::cout << std::string(70, '-') << "\n";
+                std::cout << "\nDraft Year: " << year << "\n";
+                std::cout << std::string(70, '-') << "\n";
+                std::cout << std::left << std::setw(30) << "Player"
+                          << std::setw(5) << "Pos"
+                          << std::setw(20) << "NFL Team"
+                          << std::setw(10) << "Round"
+                          << "Pick\n";
+                std::cout << std::string(70, '-') << "\n";
+                prevYear = year;
+            }
+
+            std::cout << std::left << std::setw(30) << stmt.getColumn("full_name").getText()
+                      << std::setw(5) << stmt.getColumn("position").getText()
+                      << std::setw(20) << stmt.getColumn("nfl_team").getText()
+                      << std::setw(10) << stmt.getColumn("draft_round").getInt()
+                      << stmt.getColumn("draft_pick").getInt() << "\n";
+        }
+        std::cout << std::string(70, '=') << "\n";
+    }
+    catch (std::exception& e) {
+        std::cerr << "Error while querying recent high draft unrostered players: " << e.what() << std::endl;
+    }
+}
+
+// Modify the main() function to include this new function:
 
 int main() {
     try {
@@ -515,7 +659,17 @@ int main() {
             fetchDraftInformation(year);
         }
 
-        displayPlayersWithDraftInfo();
+        // Create the processed_players table
+        createProcessedPlayersTable(db);
+
+        // Store the processed players in the database
+        storeProcessedPlayers(db);
+
+        // Display processed players from the database
+
+
+        // Display recent high draft unrostered players
+        displayRecentHighDraftUnrosteredPlayers(db);
 
         curl_global_cleanup();
     }
